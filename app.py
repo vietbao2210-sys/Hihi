@@ -9,6 +9,8 @@ import uuid
 import json
 import sqlite3
 import traceback
+import importlib
+import importlib.util
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -45,8 +47,9 @@ ALLOWED_DOMAIN = (os.getenv("ALLOWED_DOMAIN", "") or "").strip().lower()  # opti
 # Scopes for basic identity
 SCOPES = ["openid", "profile", "email"]
 
-# Model module you already have (must expose run_from_excel)
-MODEL_MODULE_NAME = os.getenv("MODEL_MODULE", "planning_6_2-2")
+# Model module/file you already have (must expose run_from_excel)
+# Accepts values like: planning_6_2_2, planning_6_2-2.py, /abs/path/planning_6_2-2.py
+MODEL_MODULE_NAME = os.getenv("MODEL_MODULE", "planning_6_2-2.py")
 
 # =========================
 # VALIDATION RULES
@@ -480,23 +483,58 @@ def validate_excel(file_path: str) -> Tuple[bool, List[ValidationError], Dict[st
 # =========================
 # MODEL RUNNER
 # =========================
-def run_model(input_path: str, output_path: str) -> None:
+def _load_model_module(model_ref: str):
     """
-    Calls your model module run_from_excel(input_path, output_path)
+    Load model from module name or python file path.
+
+    Supports:
+      - "planning_6_2_2"
+      - "planning_6_2-2.py"
+      - "/abs/path/planning_6_2-2.py"
     """
+    ref = (model_ref or "").strip()
+    if not ref:
+        raise RuntimeError("MODEL_MODULE rỗng. Hãy cấu hình tên module hoặc đường dẫn file .py.")
+
+    if ref.endswith(".py") or os.path.sep in ref:
+        abs_path = ref if os.path.isabs(ref) else os.path.join(os.getcwd(), ref)
+        if not os.path.exists(abs_path):
+            raise RuntimeError(
+                f"Không tìm thấy file model: {abs_path}. "
+                f"Hãy đặt file model đúng đường dẫn hoặc cập nhật MODEL_MODULE."
+            )
+
+        mod_name = f"planning_model_{short_id()}"
+        spec = importlib.util.spec_from_file_location(mod_name, abs_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Không load được module spec từ file: {abs_path}")
+
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
     try:
-        mod = __import__(MODEL_MODULE_NAME)
+        return importlib.import_module(ref)
     except Exception as e:
         raise RuntimeError(
-            f"Không import được module '{MODEL_MODULE_NAME}'.\n"
-            f"- Hãy đảm bảo file '{MODEL_MODULE_NAME}.py' nằm cùng folder với app.py\n"
-            f"- Và có hàm run_from_excel(input_path, output_path)\n\n"
+            f"Không import được module '{ref}'.\n"
+            f"- Hãy đảm bảo module nằm trong PYTHONPATH\n"
+            f"- Hoặc set MODEL_MODULE thành đường dẫn file .py\n\n"
             f"Import error: {e}"
         )
 
+
+def run_model(input_path: str, output_path: str) -> None:
+    """
+    Calls model.run_from_excel(input_path, output_path)
+    """
+    mod = _load_model_module(MODEL_MODULE_NAME)
+
     fn = getattr(mod, "run_from_excel", None)
     if fn is None:
-        raise RuntimeError(f"Module '{MODEL_MODULE_NAME}' không có hàm run_from_excel(input_path, output_path).")
+        raise RuntimeError(
+            f"Model '{MODEL_MODULE_NAME}' không có hàm run_from_excel(input_path, output_path)."
+        )
 
     fn(input_path, output_path)
 
